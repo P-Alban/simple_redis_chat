@@ -5,63 +5,69 @@ from cmd import Cmd
 import redis
 
 lock = threading.RLock()
-connect = redis.from_url(os.getenv("REDIS_URL"))
+connect = redis.from_url(os.getenv("REDIS_URL", ""))
 subscriber = connect.pubsub()
 
 
 class ChannelListener(threading.Thread):
 
-    def __init__(self, username, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.username = username
 
     def run(self):
         for message in subscriber.listen():
             self.notify(message)
 
-    def notify(self, message):
+    @staticmethod
+    def notify(message):
         if message["type"] != "message":
             return
-        text = message["data"].decode()
+        username, text = message["data"].decode().split(maxsplit=1)
+        channel = message["channel"].decode()
         with lock:
-            print("\n(MESSAGE) [{}]: {}\n".format(self.username, text))
+            print("\n(MESSAGE FROM {}) {} {}\n".format(channel, username, text))
 
 
 class ChatPrompt(Cmd):
     prompt = "(CHAT) > "
     intro = "Simple chat client"
-    current_channel = None
+    channels = []
 
     def __init__(self, username, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.username = username
 
-    def do_exit(self, *args):
-        subscriber.unsubscribe(self.current_channel)
+    @staticmethod
+    def do_exit(*args):
+        subscriber.unsubscribe()
         return True
 
-    def do_leave(self, *args):
-        subscriber.unsubscribe(self.current_channel)
-        print("Leave from {}".format(self.current_channel))
+    def do_leave(self, channel="all"):
+        if channel == "all":
+            subscriber.unsubscribe(self.channels)
+            self.channels.clear()
+        else:
+            subscriber.unsubscribe(*channel.split())
 
-    def do_send(self, message):
-        if not self.current_channel:
-            print("Subscribe to some channel.")
+    def do_send(self, data):
+        data = data.split(maxsplit=1)
+        if not self.channels and len(data) != 2:
+            print("Specify message and channel.")
+        channel = data[0] if len(data) == 2 else self.channels[-1]
+        message = data[-1]
         if not message:
             print("Specify the message text.")
         else:
-            connect.publish(self.current_channel, message)
+            connect.publish(channel, "[{}]: {}".format(self.username, message))
 
     def do_subscribe(self, channel):
         if not channel:
             print("Error: you should enter a channel.")
-        if self.current_channel:
-            print("First unsubscribe from {}".format(self.current_channel))
         else:
             print("Subscribed to {}".format(channel))
-            self.current_channel = channel
+            self.channels.append(channel)
             subscriber.subscribe(channel)
-            ChannelListener(self.username).start()
+            ChannelListener().start()
 
 
 if __name__ == '__main__':
